@@ -6,12 +6,10 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
-from dotenv import load_dotenv
 
 app = FastAPI()
-load_dotenv()
 
-# Allow all origins for testing
+# -- CORS agar API bisa diakses dari aplikasi Android --
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,51 +18,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-COOKIE_FILE = "cookies.txt"
+# -- Path absolut ke file cookies --
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 def slugify_filename(text: str) -> str:
-    """Make a string safe for a filename."""
+    """Bersihkan judul dari karakter aneh untuk nama file."""
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
     text = re.sub(r'[^a-zA-Z0-9\s_.-]', '', text)
     text = re.sub(r'[\s]+', '_', text)
     return text.strip('_.-') or "downloaded_audio"
 
 @app.get("/download")
-async def download_video(
-    url: str = Query(...),
-    format: str = Query("best")
-):
+async def download_video(url: str, format: str = "best"):
+    # --- Validasi awal URL (opsional) ---
+    # if 'tiktok.com' in url and '/photo/' in url:
+    #     raise HTTPException(400, "TikTok photo URLs are not supported (only videos).")
+
     try:
-        # --- Extract metadata (title) ---
+        # Step 1: Ambil informasi video (judul)
         with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
             info = ydl.extract_info(url, download=False)
             title = slugify_filename(info.get("title", "video"))
+            # Tentukan nama file akhir
             if format == "bestaudio/best":
                 filename = f"{title}.mp3"
             else:
                 filename = f"{title}.mp4"
 
+        # Step 2: Siapkan direktori dan nama file sementara
         uid = uuid.uuid4().hex[:8]
         outtmpl = f"/tmp/{uid}.%(ext)s"
 
-        # --- Base options (cookies + user-agent + TikTok mobile API) ---
+        # Step 3: Siapkan opsi untuk yt-dlp
         ydl_opts = {
             'outtmpl': outtmpl,
             'quiet': True,
+            # --- KONFIGURASI PENTING UNTUK YOUTUBE ---
             'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-            },
             'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios', 'android'],  # Tiru client mobile
+                },
                 'tiktok': {
                     'api_hostname': ['api22-normal-c-alisg.tiktokv.com'],
                 },
             },
+            # --- HEADER PENTING UNTUK MENGHINDARI BLOKIR ---
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+            },
         }
 
-        # --- Audio (MP3) configuration ---
+        # Step 4: Konfigurasi khusus untuk unduhan Audio (MP3)
         if format == "bestaudio/best":
-            # First try bestaudio, then fallback to any audio + conversion
             ydl_opts.update({
                 'format': 'bestaudio/best',
                 'postprocessors': [{
@@ -74,14 +81,16 @@ async def download_video(
                 }],
             })
         else:
-            ydl_opts['format'] = format
-            ydl_opts['merge_output_format'] = 'mp4'
+            ydl_opts.update({
+                'format': format,
+                'merge_output_format': 'mp4',
+            })
 
-        # --- Download ---
+        # Step 5: Eksekusi download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # --- Locate the downloaded file ---
+        # Step 6: Cari file yang sudah didownload
         actual_file_path = None
         for f in os.listdir("/tmp"):
             if f.startswith(uid):
@@ -89,9 +98,9 @@ async def download_video(
                 break
 
         if not actual_file_path or not os.path.exists(actual_file_path):
-            raise HTTPException(500, "Downloaded file not found.")
+            raise HTTPException(status_code=500, detail="Downloaded file not found.")
 
-        # --- Stream and delete ---
+        # Step 7: Kirim file sebagai streaming response
         def iterfile():
             with open(actual_file_path, "rb") as f:
                 yield from f
@@ -105,8 +114,7 @@ async def download_video(
         )
 
     except Exception as e:
-        # Send the exact error to the client for debugging
-        raise HTTPException(500, detail=f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/")
 async def root():

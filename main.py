@@ -1,7 +1,5 @@
 import os
 import uuid
-import re
-import unicodedata
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,66 +9,46 @@ from dotenv import load_dotenv
 app = FastAPI()
 load_dotenv()
 
-# CORS configuration – allow all origins for development
-app.add_middleware(
-    CORSMiddleware,
+# Allow all origins (adjust if needed)
+app.add_middleware(CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Path to cookies file (Netscape format) – make sure cookies.txt is in the same directory
+# --- Path to your cookies file (make sure cookies.txt is in the same directory) ---
 COOKIE_FILE = "cookies.txt"
 
-def slugify_filename(text: str) -> str:
-    """Convert text to a safe filename."""
-    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
-    text = re.sub(r'[^a-zA-Z0-9\s_.-]', '', text)
-    text = re.sub(r'[\s]+', '_', text)
-    return text.strip('_.-') or "downloaded_audio"
-
+# --- Helper function to validate TikTok video (no '/photo/') ---
 def is_valid_tiktok_video(url: str) -> bool:
-    """Reject TikTok photo links early."""
     return '/photo/' not in url
 
 @app.get("/download")
-async def download_video(
-    url: str = Query(..., description="Video URL to download"),
-    format: str = Query("best", description="Format: 'bestaudio/best' for MP3, or 'best' for video")
-):
-    # Validate TikTok photo URLs
+async def download_video(url: str = Query(...), format: str = Query("best")):
+    # Optional but good: reject TikTok photo links early
     if 'tiktok.com' in url and not is_valid_tiktok_video(url):
-        raise HTTPException(
-            status_code=400,
-            detail="TikTok photo URLs are not supported (only videos)."
-        )
+        raise HTTPException(status_code=400, detail="TikTok photo URLs are not supported (only videos).")
 
     try:
-        # Extract video info without downloading
+        # Extract metadata (title, etc.)
         with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
             info = ydl.extract_info(url, download=False)
-            title = slugify_filename(info.get("title", "video"))
+            title = info.get("title", "video").replace("/", "-").replace("\\", "-")
+            extension = "mp4"  # fallback
+            filename = f"{title}.{extension}"
 
-        # Determine output filename and extension
-        if format == 'bestaudio/best':
-            filename = f"{title}.mp3"
-        else:
-            filename = f"{title}.mp4"
-
-        # Unique temporary file template
+        # Unique ID for temporary file
         uid = uuid.uuid4().hex[:8]
-        outtmpl = f"/tmp/{uid}.%(ext)s"
+        output_template = f"/tmp/{uid}.%(ext)s"
 
-        # Base yt-dlp options
+        # --- Base yt-dlp options ---
         ydl_opts = {
-            'outtmpl': outtmpl,
+            'format': format,
+            'outtmpl': output_template,
             'quiet': True,
+            'merge_output_format': 'mp4',
             'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-            },
-            # Force TikTok to use mobile API (helps with short links)
             'extractor_args': {
                 'tiktok': {
                     'api_hostname': ['api22-normal-c-alisg.tiktokv.com'],
@@ -78,7 +56,7 @@ async def download_video(
             },
         }
 
-        # Configure for audio or video
+        # --- Force audio extraction when format is 'bestaudio/best' ---
         if format == 'bestaudio/best':
             ydl_opts.update({
                 'format': 'bestaudio',
@@ -88,15 +66,16 @@ async def download_video(
                     'preferredquality': '192',
                 }],
             })
+        # --- handle the normal 'best' video format ---
         else:
             ydl_opts['format'] = format
             ydl_opts['merge_output_format'] = 'mp4'
 
-        # Download
+        # --- Perform the download ---
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # Find the downloaded file
+        # --- Locate the downloaded file ---
         actual_file_path = None
         for f in os.listdir("/tmp"):
             if f.startswith(uid):
@@ -104,14 +83,15 @@ async def download_video(
                 break
 
         if not actual_file_path or not os.path.exists(actual_file_path):
-            raise HTTPException(status_code=500, detail="Downloaded file not found.")
+            raise HTTPException(status_code=500, detail="Download failed or file not found.")
 
-        # Stream file and clean up
+        # --- Stream the file back to the client ---
         def iterfile():
             with open(actual_file_path, "rb") as f:
                 yield from f
-            os.unlink(actual_file_path)
+            os.unlink(actual_file_path)  # clean up
 
+        # --- Dynamically set media type based on format ---
         media_type = "audio/mpeg" if format == 'bestaudio/best' else "video/mp4"
         return StreamingResponse(
             iterfile(),
@@ -124,4 +104,8 @@ async def download_video(
 
 @app.get("/")
 async def root():
-    return {"message": "Social Media Video Downloader API. Use /download?url=...&format=bestaudio/best for MP3 audio."}
+    return {"message": "Welcome to the Social Media Video Downloader API. Use /download?url=<video_url>&format=<video_format> to download videos."}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

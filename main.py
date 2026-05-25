@@ -1,5 +1,7 @@
 import os
 import uuid
+import re
+import unicodedata
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +11,6 @@ from dotenv import load_dotenv
 app = FastAPI()
 load_dotenv()
 
-# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,13 +23,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 def slugify_filename(text: str) -> str:
-    """Membersihkan string untuk dijadikan nama file yang aman."""
-    return "".join(c for c in text if c.isalnum() or c in " ._-").rstrip()
+    """Bersihkan judul untuk nama file (hanya huruf, angka, spasi, garis bawah, strip)."""
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+    text = re.sub(r'[^a-zA-Z0-9\s_.-]', '', text)
+    text = re.sub(r'[\s]+', '_', text)
+    return text.strip('_.-') or "downloaded_audio"
 
 @app.get("/download")
 async def download_video(url: str = Query(...), format: str = Query("best")):
     try:
-        # 1. Ambil metadata untuk mendapatkan judul
+        # Ambil metadata (judul)
         with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
             info = ydl.extract_info(url, download=False)
             title = slugify_filename(info.get("title", "video"))
@@ -36,50 +40,53 @@ async def download_video(url: str = Query(...), format: str = Query("best")):
         uid = uuid.uuid4().hex[:8]
         outtmpl = f"/tmp/{uid}.%(ext)s"
 
-        # 2. Opsi dasar dengan konfigurasi yang kuat
+        # Opsi dasar
         ydl_opts = {
             'outtmpl': outtmpl,
-            'quiet': False,                     # Aktifkan logging untuk debugging
+            'quiet': False,               # Biarkan log muncul untuk debug
             'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
             },
-            # --- KONFIGURASI PENTING UNTUK YOUTUBE & TIKTOK ---
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios'],   # Gunakan client mobile
+                    'player_client': ['android', 'ios'],   # Tiru client mobile
                 },
                 'tiktok': {
                     'api_hostname': ['api22-normal-c-alisg.tiktokv.com'],
                 },
             },
-            # --- KONFIGURASI UNTUK MENGHINDARI RATE LIMIT ---
-            'sleep_interval': 5,                 # Jeda 5 detik antar request
-            'max_sleep_interval': 15,            # Jeda maksimal 15 detik
-            'sleep_interval_requests': 1,        # Jeda setelah setiap request
+            'sleep_interval': 3,
+            'max_sleep_interval': 10,
         }
 
-        # 3. Konfigurasi untuk unduhan Audio (MP3)
+        # ========== AUDIO MP3 ==========
         if format == "bestaudio/best":
             ydl_opts.update({
-                'format': 'bestaudio/best',
+                'format': 'bestaudio',                    # ✅ PERBAIKAN: gunakan 'bestaudio'
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
             })
+            filename = f"{title}.mp3"
+            media_type = "audio/mpeg"
+        # ========== VIDEO ==========
         else:
             ydl_opts.update({
                 'format': format,
                 'merge_output_format': 'mp4',
             })
+            filename = f"{title}.mp4"
+            media_type = "video/mp4"
 
-        # 4. Eksekusi download
+        # Eksekusi download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # 5. Cari file yang sudah di-download
+        # Cari file hasil download
         actual_file_path = None
         for f in os.listdir("/tmp"):
             if f.startswith(uid):
@@ -87,16 +94,14 @@ async def download_video(url: str = Query(...), format: str = Query("best")):
                 break
 
         if not actual_file_path or not os.path.exists(actual_file_path):
-            raise HTTPException(500, "Downloaded file not found.")
+            raise HTTPException(500, "File hasil download tidak ditemukan.")
 
-        # 6. Kirim file sebagai streaming response
+        # Streaming file
         def iterfile():
             with open(actual_file_path, "rb") as f:
                 yield from f
             os.unlink(actual_file_path)
 
-        media_type = "audio/mpeg" if format == "bestaudio/best" else "video/mp4"
-        filename = f"{title}.mp3" if format == "bestaudio/best" else f"{title}.mp4"
         return StreamingResponse(
             iterfile(),
             media_type=media_type,
@@ -105,3 +110,7 @@ async def download_video(url: str = Query(...), format: str = Query("best")):
 
     except Exception as e:
         raise HTTPException(500, detail=f"Error: {str(e)}")
+
+@app.get("/")
+async def root():
+    return {"message": "API Social Media Video Downloader berjalan. Gunakan /download?url=...&format=bestaudio/best untuk MP3."}

@@ -2,6 +2,7 @@ import os
 import uuid
 import re
 import unicodedata
+import tempfile
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +20,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
+# --- Baca cookies dari environment variable COOKIE_CONTENT ---
+COOKIE_ENV_VAR = "COOKIE_CONTENT"
+cookie_content = os.getenv(COOKIE_ENV_VAR)
+temp_cookie_file = None
+COOKIE_FILE_PATH = None
+
+if cookie_content:
+    try:
+        # Buat file temporary untuk menyimpan isi cookies
+        temp_cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        temp_cookie_file.write(cookie_content)
+        temp_cookie_file.flush()
+        temp_cookie_file.close()
+        COOKIE_FILE_PATH = temp_cookie_file.name
+        print(f"Cookies loaded from environment variable to {COOKIE_FILE_PATH}")
+    except Exception as e:
+        print(f"Failed to create temporary cookie file: {e}")
+        COOKIE_FILE_PATH = None
+else:
+    print("COOKIE_CONTENT environment variable not found. Proceeding without cookies.")
 
 def slugify_filename(text: str) -> str:
     """Bersihkan judul untuk nama file (hanya huruf, angka, spasi, garis bawah, strip)."""
@@ -44,7 +63,7 @@ async def download_video(url: str = Query(...), format: str = Query("best")):
         ydl_opts = {
             'outtmpl': outtmpl,
             'quiet': False,               # Biarkan log muncul untuk debug
-            'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None,
+            'cookiefile': COOKIE_FILE_PATH if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH) else None,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
